@@ -1,0 +1,25 @@
+# Podcast Ad Integration Backend
+
+# Flask
+Flask>=2.3.0
+Flask-CORS>=4.0.0
+Werkzeug>=2.3.0
+
+# AI/ML Models from HuggingFace
+transformers>=4.36.0
+torch>=2.0.0
+torchaudio>=2.0.0
+sentence-transformers>=2.2.0
+datasets>=2.14.0
+
+# Audio Processing
+pydub>=0.25.1
+soundfile>=0.12.1
+librosa>=0.10.0
+numpy>=1.24.0
+
+# Speech Processing
+openai-whisper>=20230918
+
+# Utilities
+python-dotenv>=1.0.0
