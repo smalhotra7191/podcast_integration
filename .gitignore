@@ -67,4 +67,19 @@ frontend/yarn-error.log*
 Thumbs.db
 
 backend/tmp_model/
-backend/test_outputs/
+backend/test_outputs/backend/tmp_model_diarization/
+backend/tmp_model_ecapa/
+backend/tmp_model_verification/
+backend/chunks/
+backend/uploads/
+backend/outputs/
+
+# Large audio/video files
+samples/*.wav
+samples/*.mp3
+samples/*.mp4
+samples/*.m4a
+*.wav
+*.mp3
+*.mp4
+*.m4a

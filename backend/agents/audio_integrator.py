@@ -6,6 +6,7 @@ import os
 import tempfile
 from pydub import AudioSegment
 from pydub.effects import normalize, compress_dynamic_range
+from pydub.silence import detect_silence
 import numpy as np
 
 class AudioIntegrator:
@@ -13,6 +14,70 @@ class AudioIntegrator:
         """Initialize the audio integrator"""
         self.default_transition_duration = 500  # ms
         self.default_fade_duration = 300  # ms
+    
+    def _find_silence_point(self, audio: AudioSegment, target_ms: int, search_window: int = 2000) -> int:
+        """
+        Find a natural pause/silence point near the target timestamp.
+        This ensures we don't cut audio in the middle of a word or sentence.
+        Uses multiple detection strategies from strict (sentence breaks) to lenient (word gaps).
+        
+        Args:
+            audio: The audio segment to search in
+            target_ms: Target insertion point in milliseconds
+            search_window: How far to search before/after target (ms)
+            
+        Returns:
+            Adjusted insertion point in milliseconds
+        """
+        # Define search range
+        start_search = max(0, target_ms - search_window)
+        end_search = min(len(audio), target_ms + search_window)
+        
+        # Extract the segment to analyze
+        segment = audio[start_search:end_search]
+        
+        # Try multiple silence detection strategies, from strict to lenient
+        silence_configs = [
+            # (min_silence_len, silence_thresh, description)
+            (400, -42, "sentence break (400ms, -42dB)"),  # Sentence breaks - most natural
+            (300, -40, "phrase break (300ms, -40dB)"),    # Phrase pauses
+            (200, -38, "word gap (200ms, -38dB)"),        # Word gaps
+            (150, -35, "short pause (150ms, -35dB)"),     # Short pauses - last resort
+        ]
+        
+        for min_silence_len, silence_thresh, description in silence_configs:
+            try:
+                silences = detect_silence(segment, min_silence_len=min_silence_len, silence_thresh=silence_thresh)
+                
+                if silences:
+                    # Find the best silence: prefer longer pauses closer to target
+                    best_silence = None
+                    best_score = float('-inf')
+                    
+                    for silence_start, silence_end in silences:
+                        silence_duration = silence_end - silence_start
+                        silence_mid = (silence_start + silence_end) // 2
+                        actual_position = start_search + silence_mid
+                        distance = abs(actual_position - target_ms)
+                        
+                        # Score: prefer longer silences, penalize distance from target
+                        score = silence_duration - (distance * 0.5)
+                        
+                        if score > best_score:
+                            best_score = score
+                            best_silence = actual_position
+                    
+                    if best_silence is not None:
+                        print(f"  Found {description} at {best_silence/1000:.2f}s (adjusted from {target_ms/1000:.2f}s)")
+                        return best_silence
+                        
+            except Exception as e:
+                print(f"  Silence detection ({description}) failed: {e}")
+                continue
+        
+        # If no silence found with any config, return original target
+        print(f"  Warning: No natural pause found near {target_ms/1000:.2f}s, using original point")
+        return target_ms
         
     def integrate_ad(
         self,
@@ -62,6 +127,9 @@ class AudioIntegrator:
         # Don't insert in the last 2 seconds to ensure smooth outro
         max_insertion = max(0, len(podcast) - 2000)
         insertion_ms = max(0, min(insertion_ms, max_insertion))
+        
+        # Fine-tune insertion point to find a natural pause (low audio energy)
+        insertion_ms = self._find_silence_point(podcast, insertion_ms)
         
         print(f"Inserting ad at {insertion_ms/1000:.2f}s (podcast duration: {len(podcast)/1000:.2f}s)")
         

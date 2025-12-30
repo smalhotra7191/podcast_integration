@@ -122,6 +122,10 @@ def test_content_analysis(transcription, ad_analysis):
     print(f"  Best segment: {best.get('start', 0):.2f}s - {best.get('end', 0):.2f}s")
     print(f"  Relevance: {best.get('relevance_score', 0):.3f}")
     
+    if not best:
+        print("No best segment found. Skipping segment analysis.")
+        return result
+    
     return result
 
 def test_speaker_sample(podcast_path):
