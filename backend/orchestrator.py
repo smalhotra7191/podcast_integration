@@ -27,7 +27,8 @@ class PodcastAdOrchestrator:
         selected_speaker: int = None,
         audio_path: str = None,
         workflow: str = 'full',  # 'full' for integration, 'ad_only' for just ad generation
-        speaker_sample_path: str = None  # Pre-saved speaker sample from speaker detection
+        speaker_sample_path: str = None,  # Pre-saved speaker sample from speaker detection
+        cancellation_check: Optional[Callable[[], bool]] = None  # Check if job was cancelled
     ):
         """
         Initialize the orchestrator
@@ -43,6 +44,7 @@ class PodcastAdOrchestrator:
             audio_path: Pre-extracted audio path (if already extracted during speaker detection)
             workflow: 'full' for full integration, 'ad_only' for just generating the ad
             speaker_sample_path: Pre-saved speaker sample path from speaker detection phase
+            cancellation_check: Callback to check if job was cancelled
         """
         self.podcast_path = podcast_path
         self.ad_script_path = ad_script_path
@@ -54,6 +56,7 @@ class PodcastAdOrchestrator:
         self.pre_extracted_audio = audio_path
         self.workflow = workflow
         self.speaker_sample_path = speaker_sample_path  # Pre-saved speaker sample
+        self.cancellation_check = cancellation_check or (lambda: False)  # Check if cancelled
         
         # Initialize agents with speed mode
         self.ad_analyzer = AdScriptAnalyzer()
@@ -82,6 +85,11 @@ class PodcastAdOrchestrator:
         print(f"[{progress}%] {message}")
         self.status_callback(progress, message)
     
+    def _check_cancelled(self):
+        """Check if job was cancelled and raise exception if so"""
+        if self.cancellation_check():
+            raise Exception("Job was cancelled by user")
+    
     def process(self) -> str:
         """
         Run the full pipeline to integrate ad into podcast
@@ -91,6 +99,7 @@ class PodcastAdOrchestrator:
             Path to the output file
         """
         self._update_status(5, "Starting optimized pipeline...")
+        self._check_cancelled()
         
         # ============= PHASE 1: Parallel Initialization =============
         # Ad analysis and audio extraction can run in parallel
@@ -115,10 +124,13 @@ class PodcastAdOrchestrator:
             if 'audio' in futures:
                 audio_path = futures['audio'].result()
         
+        self._check_cancelled()
+        
         print(f"Ad Analysis Results:")
         print(f"  Product: {ad_analysis['product_name']}")
         print(f"  Problem: {ad_analysis['problem_solved']}")
-        print(f"  Keywords: {ad_analysis['keywords'][:5]}")
+        print(f"  Problem Keywords: {ad_analysis.get('problem_keywords', [])[:5]}")
+        print(f"  General Keywords: {ad_analysis['keywords'][:5]}")
         
         # ============= PHASE 2: Transcription (main bottleneck) =============
         self._update_status(15, "Transcribing podcast (this may take a while for long podcasts)...")
@@ -126,6 +138,8 @@ class PodcastAdOrchestrator:
             audio_path,
             status_callback=self.status_callback
         )
+        
+        self._check_cancelled()
         
         # ============= PHASE 3: Parallel Analysis & Sample Extraction =============
         # Content analysis and speaker sample extraction can run in parallel
@@ -171,8 +185,14 @@ class PodcastAdOrchestrator:
         
         # Step 4: Determine best insertion point
         insertion_point = self._select_insertion_point(content_analysis)
+        placement_method = content_analysis.get('placement_method', 'unknown')
+        print(f"Placement Method: {placement_method}")
         print(f"Selected insertion point: {insertion_point['timestamp']:.2f}s")
         print(f"Relevance score: {insertion_point['relevance_score']:.3f}")
+        if insertion_point.get('placement_reason'):
+            print(f"Reason: {insertion_point['placement_reason']}")
+        
+        self._check_cancelled()
         
         # Step 5: Generate ad script with transitions
         self._update_status(50, "Preparing ad script with transitions...")
@@ -191,6 +211,8 @@ class PodcastAdOrchestrator:
             ad_audio_path,
             status_callback=self.status_callback
         )
+        
+        self._check_cancelled()
         
         # Get voice similarity score
         self.voice_similarity_score = self.voice_cloner.get_similarity_score()
@@ -271,7 +293,9 @@ class PodcastAdOrchestrator:
             'original_duration': original_duration_seconds,
             'final_duration': original_duration_seconds + ad_duration_seconds,
             'relevance_score': insertion_point.get('relevance_score', 0),
-            'is_natural_break': insertion_point.get('is_natural_break', False)
+            'is_natural_break': insertion_point.get('is_natural_break', False),
+            'placement_method': placement_method,
+            'placement_reason': insertion_point.get('placement_reason', '')
         }
         
         # Clean up temp files

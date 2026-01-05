@@ -160,6 +160,9 @@ def process_podcast(job_id):
         jobs[job_id]['speed_mode'] = speed_mode
         jobs[job_id]['workflow'] = workflow
         
+        # Initialize cancellation flag
+        job_cancellation[job_id] = False
+        
         # Get selected speaker if available
         selected_speaker = job.get('selected_speaker', None)
         audio_path = job.get('audio_path', None)  # Pre-extracted during speaker detection
@@ -177,6 +180,12 @@ def process_podcast(job_id):
         # Start processing in background thread
         def process_in_background():
             try:
+                # Check if cancelled before starting
+                if job_cancellation.get(job_id, False):
+                    jobs[job_id]['status'] = 'cancelled'
+                    jobs[job_id]['message'] = 'Processing was cancelled'
+                    return
+                
                 orchestrator = PodcastAdOrchestrator(
                     podcast_path=job['podcast_path'],
                     ad_script_path=job['ad_script_path'],
@@ -187,10 +196,17 @@ def process_podcast(job_id):
                     selected_speaker=selected_speaker,
                     audio_path=audio_path,
                     workflow=workflow,
-                    speaker_sample_path=speaker_sample_path
+                    speaker_sample_path=speaker_sample_path,
+                    cancellation_check=lambda: job_cancellation.get(job_id, False)
                 )
                 
                 output_path = orchestrator.process()
+                
+                # Check if cancelled after processing
+                if job_cancellation.get(job_id, False):
+                    jobs[job_id]['status'] = 'cancelled'
+                    jobs[job_id]['message'] = 'Processing was cancelled'
+                    return
                 
                 jobs[job_id]['status'] = 'completed'
                 jobs[job_id]['progress'] = 100
@@ -231,6 +247,37 @@ def update_job_status(job_id, progress, message):
     if job_id in jobs:
         jobs[job_id]['progress'] = progress
         jobs[job_id]['message'] = message
+
+@app.route('/api/cancel/<job_id>', methods=['POST'])
+def cancel_job(job_id):
+    """Cancel a processing job"""
+    try:
+        if job_id not in jobs:
+            return jsonify({'error': 'Job not found'}), 404
+        
+        job = jobs[job_id]
+        current_status = job['status']
+        
+        # Set cancellation flags
+        if job_id in speaker_detection_cancellation:
+            speaker_detection_cancellation[job_id] = True
+        
+        job_cancellation[job_id] = True
+        
+        # Update job status
+        jobs[job_id]['status'] = 'cancelled'
+        jobs[job_id]['message'] = 'Processing cancelled by user'
+        
+        print(f"Job {job_id}: Cancelled (was in status: {current_status})")
+        
+        return jsonify({
+            'job_id': job_id,
+            'status': 'cancelled',
+            'message': 'Job cancelled successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/status/<job_id>', methods=['GET'])
 def get_job_status(job_id):
@@ -305,11 +352,15 @@ def get_analysis(job_id):
         'integration_point': job.get('integration_point', {})
     })
 
-# ============== Speaker Detection Endpoints ==============
+# ============== Cancellation Infrastructure ==============
+
+# Store for cancellation tokens
+speaker_detection_cancellation = {}
+job_cancellation = {}  # For cancelling processing jobs
 
 @app.route('/api/detect-speakers/<job_id>', methods=['POST'])
 def detect_speakers(job_id):
-    """Detect speakers in the uploaded podcast and return samples"""
+    """Start speaker detection in background and return immediately"""
     try:
         if job_id not in jobs:
             return jsonify({'error': 'Job not found'}), 404
@@ -321,46 +372,111 @@ def detect_speakers(job_id):
         
         # Update status
         jobs[job_id]['status'] = 'detecting_speakers'
-        jobs[job_id]['message'] = 'Detecting speakers in podcast...'
+        jobs[job_id]['message'] = 'Starting speaker detection...'
+        jobs[job_id]['speakers_found'] = []  # List of speakers found so far
+        jobs[job_id]['speaker_detection_complete'] = False
+        
+        # Initialize cancellation token
+        speaker_detection_cancellation[job_id] = False
         
         # Create output folder for speaker samples
         job_folder = os.path.dirname(job['podcast_path'])
         
-        # Initialize podcast analyzer
-        from agents import PodcastAnalyzer
-        analyzer = PodcastAnalyzer(speed_mode='fast')
+        def detect_in_background():
+            try:
+                from agents import PodcastAnalyzer
+                analyzer = PodcastAnalyzer(speed_mode='fast')
+                
+                # Extract audio if video
+                audio_path = job['podcast_path']
+                if job.get('media_type') == 'video':
+                    audio_path = analyzer.extract_audio(job['podcast_path'])
+                    jobs[job_id]['audio_path'] = audio_path
+                else:
+                    jobs[job_id]['audio_path'] = audio_path
+                
+                # Use progressive speaker detection
+                def on_speaker_found(speaker_info):
+                    """Callback when a speaker is found"""
+                    # Check if cancelled
+                    if speaker_detection_cancellation.get(job_id, False):
+                        return False  # Signal to stop
+                    
+                    jobs[job_id]['speakers_found'].append(speaker_info)
+                    jobs[job_id]['message'] = f'Found {len(jobs[job_id]["speakers_found"])} speaker(s)...'
+                    print(f"Job {job_id}: Found speaker {speaker_info['id']}")
+                    return True  # Continue detection
+                
+                # Run progressive detection
+                final_result = analyzer.detect_speakers_progressive(
+                    audio_path,
+                    job_folder,
+                    on_speaker_found=on_speaker_found,
+                    status_callback=lambda p, m: update_job_status(job_id, p, m)
+                )
+                
+                # Check if cancelled
+                if speaker_detection_cancellation.get(job_id, False):
+                    print(f"Job {job_id}: Speaker detection was cancelled")
+                    return
+                
+                # Store final speaker info
+                jobs[job_id]['speaker_info'] = final_result
+                jobs[job_id]['speaker_detection_complete'] = True
+                jobs[job_id]['status'] = 'speakers_detected'
+                jobs[job_id]['message'] = f'Detected {final_result["num_speakers"]} speaker(s)'
+                
+                # IMPORTANT: Update speakers_found with the FINAL speaker list
+                # The preliminary speakers_found may have different/fewer speakers
+                # than the final clustering result
+                jobs[job_id]['speakers_found'] = final_result.get('speakers', [])
+                
+            except Exception as e:
+                traceback.print_exc()
+                if not speaker_detection_cancellation.get(job_id, False):
+                    jobs[job_id]['status'] = 'error'
+                    jobs[job_id]['message'] = str(e)
         
-        # Extract audio if video
-        audio_path = job['podcast_path']
-        if job.get('media_type') == 'video':
-            audio_path = analyzer.extract_audio(job['podcast_path'])
-            jobs[job_id]['audio_path'] = audio_path
-        else:
-            jobs[job_id]['audio_path'] = audio_path
-        
-        # Detect speakers
-        speaker_info = analyzer.detect_speakers(
-            audio_path,
-            job_folder,
-            status_callback=lambda p, m: update_job_status(job_id, p, m)
-        )
-        
-        # Store speaker info in job
-        jobs[job_id]['speaker_info'] = speaker_info
-        jobs[job_id]['status'] = 'speakers_detected'
-        jobs[job_id]['message'] = f'Detected {speaker_info["num_speakers"]} speaker(s)'
+        # Start background thread
+        thread = threading.Thread(target=detect_in_background)
+        thread.daemon = True
+        thread.start()
         
         return jsonify({
             'job_id': job_id,
-            'num_speakers': speaker_info['num_speakers'],
-            'speakers': speaker_info['speakers'],
-            'requires_selection': speaker_info['requires_selection']
+            'status': 'detecting_speakers',
+            'message': 'Speaker detection started'
         })
         
     except Exception as e:
         traceback.print_exc()
         jobs[job_id]['status'] = 'error'
         jobs[job_id]['message'] = str(e)
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/speaker-status/<job_id>', methods=['GET'])
+def get_speaker_status(job_id):
+    """Get current speaker detection status and any speakers found so far"""
+    try:
+        if job_id not in jobs:
+            return jsonify({'error': 'Job not found'}), 404
+        
+        job = jobs[job_id]
+        speakers_found = job.get('speakers_found', [])
+        detection_complete = job.get('speaker_detection_complete', False)
+        
+        return jsonify({
+            'job_id': job_id,
+            'status': job['status'],
+            'message': job.get('message', ''),
+            'progress': job.get('progress', 0),
+            'speakers_found': speakers_found,
+            'num_speakers': len(speakers_found),
+            'detection_complete': detection_complete,
+            'requires_selection': len(speakers_found) > 1
+        })
+        
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/speaker-sample/<job_id>/<int:speaker_id>', methods=['GET'])
@@ -371,15 +487,27 @@ def get_speaker_sample(job_id, speaker_id):
             return jsonify({'error': 'Job not found'}), 404
         
         job = jobs[job_id]
+        
+        # First check final speaker_info (for completed detection)
         speaker_info = job.get('speaker_info', {})
         speakers = speaker_info.get('speakers', [])
         
-        # Find the speaker
+        # Also check speakers_found (for progressive/in-progress detection)
+        speakers_found = job.get('speakers_found', [])
+        
+        # Find the speaker in either list
         speaker = None
         for s in speakers:
             if s['id'] == speaker_id:
                 speaker = s
                 break
+        
+        # If not found in final speakers, check in-progress speakers
+        if not speaker:
+            for s in speakers_found:
+                if s['id'] == speaker_id:
+                    speaker = s
+                    break
         
         if not speaker:
             return jsonify({'error': 'Speaker not found'}), 404
@@ -414,10 +542,32 @@ def select_speaker(job_id):
         
         speaker_id = data.get('speaker_id', 0)
         
+        # Cancel ongoing speaker detection if still running
+        if job_id in speaker_detection_cancellation:
+            speaker_detection_cancellation[job_id] = True
+            print(f"Job {job_id}: Cancelling speaker detection - user selected speaker {speaker_id}")
+        
+        # Get the selected speaker's sample path
+        speakers_found = job.get('speakers_found', [])
+        selected_speaker_info = None
+        for speaker in speakers_found:
+            if speaker['id'] == speaker_id:
+                selected_speaker_info = speaker
+                break
+        
         # Store selection
         jobs[job_id]['selected_speaker'] = speaker_id
+        jobs[job_id]['selected_speaker_info'] = selected_speaker_info
         jobs[job_id]['status'] = 'speaker_selected'
         jobs[job_id]['message'] = f'Speaker {speaker_id + 1} selected for ad voice'
+        
+        # Store speaker info if not already done (from partial detection)
+        if 'speaker_info' not in jobs[job_id] and speakers_found:
+            jobs[job_id]['speaker_info'] = {
+                'num_speakers': len(speakers_found),
+                'speakers': speakers_found,
+                'requires_selection': len(speakers_found) > 1
+            }
         
         return jsonify({
             'job_id': job_id,

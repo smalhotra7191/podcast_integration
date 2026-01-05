@@ -46,7 +46,8 @@ class AdScriptAnalyzer:
         """
         Analyze the ad script to extract:
         - Product name and description
-        - Problem being solved
+        - Problem being solved (critical for placement)
+        - Problem-related keywords for searching in podcast
         - Target audience
         - Key selling points
         - Call to action
@@ -60,6 +61,7 @@ class AdScriptAnalyzer:
             'product_name': self._extract_product_name(script_content),
             'product_description': self._extract_product_description(script_content),
             'problem_solved': self._extract_problem(script_content),
+            'problem_keywords': self.get_problem_keywords(script_content),  # New: for searching in podcast
             'target_audience': self._extract_target_audience(script_content),
             'key_benefits': self._extract_benefits(script_content),
             'call_to_action': self._extract_cta(script_content),
@@ -117,14 +119,17 @@ class AdScriptAnalyzer:
         return text[:200] + "..." if len(text) > 200 else text
     
     def _extract_problem(self, text: str) -> str:
-        """Extract the problem being solved"""
+        """Extract the problem being solved - this is critical for ad placement"""
+        problems_found = []
+        
+        # Try QA approach first
         try:
             result = self.qa_model(
                 question="What problem does this product solve?",
                 context=text
             )
             if result['score'] > 0.05:
-                return result['answer']
+                problems_found.append(result['answer'])
         except:
             pass
         
@@ -134,15 +139,73 @@ class AdScriptAnalyzer:
             r'struggling with\s+([^.?!]+)',
             r'problem(?:s)? (?:of|with)\s+([^.?!]+)',
             r'(?:do you|have you)\s+(?:ever\s+)?([^.?!]+\?)',
-            r'(?:frustrated|annoyed|bothered) (?:by|with)\s+([^.?!]+)'
+            r'(?:frustrated|annoyed|bothered) (?:by|with)\s+([^.?!]+)',
+            r'(?:hard|difficult|challenging) to\s+([^.?!]+)',
+            r'(?:hate|dislike|can\'t stand)\s+([^.?!]+)',
+            r'(?:waste|wasting)\s+(?:time|money|hours)\s+(?:on|with)?\s*([^.?!]+)',
+            r'(?:never|don\'t)\s+have\s+(?:enough\s+)?(?:time|energy)\s+(?:for|to)\s+([^.?!]+)',
+            r'(?:overwhelmed|stressed|anxious)\s+(?:by|about|with)\s+([^.?!]+)',
+            r'(?:worried|concerned)\s+about\s+([^.?!]+)',
+            r'(?:can\'t|cannot|couldn\'t)\s+(?:seem to|figure out|manage)\s+([^.?!]+)',
         ]
         
         for pattern in problem_patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                return match.group(1).strip()
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            for match in matches:
+                cleaned = match.strip().rstrip('?.,!')
+                if len(cleaned) > 10:  # Minimum length for meaningful problem
+                    problems_found.append(cleaned)
+        
+        if problems_found:
+            # Return the most detailed problem found
+            return max(problems_found, key=len)
         
         return "General improvement/enhancement"
+    
+    def get_problem_keywords(self, text: str) -> list:
+        """
+        Extract key phrases that describe the problem being solved.
+        These will be used to search for problem mentions in the podcast.
+        """
+        problem_keywords = []
+        
+        # Get the main problem description
+        main_problem = self._extract_problem(text)
+        if main_problem and main_problem != "General improvement/enhancement":
+            # Extract key noun phrases from the problem
+            words = main_problem.lower().split()
+            # Create n-grams (2-3 word phrases)
+            for i in range(len(words)):
+                if i < len(words) - 1:
+                    problem_keywords.append(' '.join(words[i:i+2]))
+                if i < len(words) - 2:
+                    problem_keywords.append(' '.join(words[i:i+3]))
+            problem_keywords.append(main_problem.lower())
+        
+        # Also look for explicit problem indicators in the text
+        text_lower = text.lower()
+        
+        # Pattern-based keyword extraction
+        indicator_patterns = [
+            r'(?:tired of|struggling with|problem with|hard to|difficult to)\s+(\w+(?:\s+\w+)?)',
+            r'(?:save|saving)\s+(?:time|money|hours)\s+(?:on|with)?\s*(\w+(?:\s+\w+)?)',
+            r'(?:manage|managing|track|tracking)\s+(\w+)',
+            r'(?:improve|improving|better)\s+(\w+)',
+        ]
+        
+        for pattern in indicator_patterns:
+            matches = re.findall(pattern, text_lower)
+            problem_keywords.extend(matches)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_keywords = []
+        for kw in problem_keywords:
+            if kw not in seen and len(kw) > 3:
+                seen.add(kw)
+                unique_keywords.append(kw)
+        
+        return unique_keywords[:10]  # Return top 10 problem-related keywords
     
     def _extract_target_audience(self, text: str) -> str:
         """Identify target audience"""

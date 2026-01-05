@@ -255,7 +255,8 @@ class VoiceCloningAgent:
     def _prepare_speaker_sample(self, audio_path: str) -> str:
         """
         Prepare speaker sample for ElevenLabs voice cloning.
-        ElevenLabs works best with clean audio samples.
+        ElevenLabs works best with clean audio samples that capture
+        the speaker's natural tempo, accent, and speaking style.
         
         Args:
             audio_path: Path to the speaker's audio file
@@ -267,6 +268,8 @@ class VoiceCloningAgent:
         
         # Load audio
         audio = AudioSegment.from_file(audio_path)
+        original_duration = len(audio) / 1000
+        print(f"Original sample duration: {original_duration:.1f}s")
         
         # Convert to mono
         if audio.channels > 1:
@@ -276,22 +279,68 @@ class VoiceCloningAgent:
         if audio.frame_rate != 44100:
             audio = audio.set_frame_rate(44100)
         
-        # Normalize audio
+        # Remove silence from beginning and end to get cleaner sample
+        # This helps capture the actual speaking patterns better
+        audio = self._trim_silence(audio)
+        
+        # Normalize audio to consistent level
         audio = audio.normalize(headroom=0.1)
         
         # ElevenLabs recommends 1-5 minutes of audio for best results
-        # Trim to max 5 minutes if longer
-        max_duration_ms = 5 * 60 * 1000  # 5 minutes
-        if len(audio) > max_duration_ms:
-            audio = audio[:max_duration_ms]
-            print(f"Trimmed audio to 5 minutes for optimal voice cloning")
+        # Use 2-3 minutes for optimal tempo/accent capture without being too long
+        min_duration_ms = 60 * 1000   # 1 minute minimum
+        max_duration_ms = 3 * 60 * 1000  # 3 minutes optimal (reduced from 5)
         
-        # Export to temp file
+        if len(audio) > max_duration_ms:
+            # Take from middle section to avoid intro/outro irregularities
+            # This captures the speaker's natural, consistent speaking style
+            start_offset = len(audio) // 4  # Start at 25%
+            audio = audio[start_offset:start_offset + max_duration_ms]
+            print(f"Trimmed audio to {max_duration_ms/1000/60:.1f} minutes from middle section")
+        elif len(audio) < min_duration_ms:
+            print(f"Warning: Sample is short ({len(audio)/1000:.1f}s). Voice cloning quality may vary.")
+        
+        # Export to temp file with high quality settings
         temp_path = tempfile.NamedTemporaryFile(suffix='.wav', delete=False).name
-        audio.export(temp_path, format='wav', parameters=["-acodec", "pcm_s16le"])
+        audio.export(temp_path, format='wav', parameters=["-acodec", "pcm_s16le", "-ar", "44100"])
         
         print(f"Prepared sample duration: {len(audio)/1000:.1f}s")
         return temp_path
+    
+    def _trim_silence(self, audio: AudioSegment, silence_thresh_db: int = -40, min_silence_len: int = 500) -> AudioSegment:
+        """
+        Trim silence from beginning and end of audio.
+        
+        Args:
+            audio: AudioSegment to trim
+            silence_thresh_db: Silence threshold in dB
+            min_silence_len: Minimum length of silence to detect (ms)
+            
+        Returns:
+            Trimmed AudioSegment
+        """
+        from pydub.silence import detect_leading_silence
+        
+        try:
+            # Detect silence at start
+            start_trim = detect_leading_silence(audio, silence_threshold=silence_thresh_db, chunk_size=10)
+            
+            # Detect silence at end
+            end_trim = detect_leading_silence(audio.reverse(), silence_threshold=silence_thresh_db, chunk_size=10)
+            
+            # Trim with some padding (100ms) to avoid cutting speech
+            start_trim = max(0, start_trim - 100)
+            end_trim = max(0, end_trim - 100)
+            
+            duration = len(audio)
+            if start_trim + end_trim < duration:
+                audio = audio[start_trim:duration - end_trim]
+                print(f"Trimmed {start_trim}ms from start and {end_trim}ms from end")
+            
+        except Exception as e:
+            print(f"Warning: Could not trim silence: {e}")
+        
+        return audio
     
     def _generate_speech(self, text: str, voice_id: str) -> bytes:
         """

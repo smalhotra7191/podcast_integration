@@ -17,7 +17,8 @@ import {
   Activity,
   Users,
   Play,
-  Pause
+  Pause,
+  X
 } from 'lucide-react';
 import './App.css';
 
@@ -223,35 +224,73 @@ function App() {
     }
   };
 
-  // Detect speakers in the podcast
+  // Poll for speaker detection status
+  const pollSpeakerStatus = useCallback(async (id) => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/api/speaker-status/${id}`);
+      const { speakers_found, detection_complete, requires_selection, message: statusMessage, progress: statusProgress } = response.data;
+      
+      // Update progress and message
+      if (statusProgress) setProgress(statusProgress);
+      if (statusMessage) setMessage(statusMessage);
+      
+      // Update speakers list if new speakers found
+      if (speakers_found && speakers_found.length > 0) {
+        setSpeakers(speakers_found);
+        
+        // Show selection UI as soon as we have speakers
+        if (speakers_found.length >= 1) {
+          setStatus('selecting_speaker');
+        }
+      }
+      
+      // Check if detection is complete
+      if (detection_complete) {
+        if (speakers_found.length === 1 && !requires_selection) {
+          // Single speaker, auto-proceed
+          setSelectedSpeaker(0);
+          await startProcessing(id, 0);
+        }
+        return true; // Detection complete
+      }
+      
+      return false; // Still detecting
+    } catch (err) {
+      console.error('Error polling speaker status:', err);
+      return false;
+    }
+  }, []);
+
+  // Detect speakers in the podcast (now starts background process and polls)
   const detectSpeakers = async (id) => {
     try {
       setStatus('detecting_speakers');
-      setProgress(10);
-      setMessage('Analyzing podcast for multiple speakers...');
+      setProgress(5);
+      setMessage('Starting speaker detection...');
+      setSpeakers([]); // Clear any previous speakers
       
-      console.log('Calling detect-speakers API for job:', id);
-      const response = await axios.post(`${API_BASE_URL}/api/detect-speakers/${id}`);
-      console.log('Speaker detection response:', response.data);
+      console.log('Starting speaker detection for job:', id);
       
-      const { num_speakers, speakers: detectedSpeakers, requires_selection } = response.data;
+      // Start detection (returns immediately)
+      await axios.post(`${API_BASE_URL}/api/detect-speakers/${id}`);
       
-      if (requires_selection && num_speakers > 1) {
-        // Multiple speakers detected, show selection UI
-        console.log(`Found ${num_speakers} speakers, showing selection UI`);
-        setSpeakers(detectedSpeakers);
-        setStatus('selecting_speaker');
-        setMessage(`Found ${num_speakers} speakers. Please select which voice to use for the ad.`);
-      } else {
-        // Single speaker, proceed directly
-        console.log('Single speaker detected, proceeding to processing');
-        setSelectedSpeaker(0);
-        await startProcessing(id, 0);
-      }
+      // Poll for status
+      const pollInterval = setInterval(async () => {
+        const complete = await pollSpeakerStatus(id);
+        if (complete) {
+          clearInterval(pollInterval);
+        }
+      }, 1000); // Poll every second
+      
+      // Also do an immediate poll
+      await pollSpeakerStatus(id);
+      
+      // Store interval ID so we can clear it if user selects a speaker
+      window.speakerPollInterval = pollInterval;
+      
     } catch (err) {
       console.error('Speaker detection error:', err);
       console.error('Error response:', err.response?.data);
-      // Show error to user instead of silently proceeding
       setStatus('error');
       setError(`Speaker detection failed: ${err.response?.data?.error || err.message}. Please try again.`);
     }
@@ -288,7 +327,13 @@ function App() {
     }
     
     try {
-      // Notify backend of selection
+      // Clear poll interval to stop background detection
+      if (window.speakerPollInterval) {
+        clearInterval(window.speakerPollInterval);
+        window.speakerPollInterval = null;
+      }
+      
+      // Notify backend of selection (this also cancels ongoing detection)
       await axios.post(`${API_BASE_URL}/api/select-speaker/${jobId}`, {
         speaker_id: selectedSpeaker
       }, {
@@ -407,6 +452,50 @@ function App() {
     setWorkflow(null);
   };
 
+  // Cancel processing and return to upload screen
+  const handleCancel = async () => {
+    try {
+      // Clear any polling intervals
+      if (window.speakerPollInterval) {
+        clearInterval(window.speakerPollInterval);
+        window.speakerPollInterval = null;
+      }
+      
+      // Stop any playing audio
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      
+      // Call cancel API if we have a job
+      if (jobId) {
+        await axios.post(`${API_BASE_URL}/api/cancel/${jobId}`);
+      }
+      
+      // Reset to upload state (keep files selected)
+      setJobId(null);
+      setStatus('idle');
+      setProgress(0);
+      setMessage('');
+      setError(null);
+      setVoiceSimilarity(null);
+      setAdPlacement(null);
+      setSpeakers([]);
+      setSelectedSpeaker(null);
+      setPlayingSpeaker(null);
+      // Keep workflow and files so user doesn't have to re-upload
+    } catch (err) {
+      console.error('Cancel error:', err);
+      // Still reset the UI even if cancel API fails
+      setJobId(null);
+      setStatus('idle');
+      setProgress(0);
+      setMessage('');
+      setSpeakers([]);
+      setSelectedSpeaker(null);
+    }
+  };
+
   // Get color for similarity score
   const getSimilarityColor = (score) => {
     if (score >= 80) return '#22c55e'; // green
@@ -444,7 +533,10 @@ function App() {
         {/* Header */}
         <header className="header">
           <div className="logo">
-            <Sparkles className="logo-icon" />
+            <div className="logo-icon-container">
+              <Mic className="logo-icon-mic" />
+              <Sparkles className="logo-icon-sparkle" />
+            </div>
             <h1>Naarad</h1>
           </div>
           <p className="tagline">AI-Powered Podcast Ad Integration</p>
@@ -673,67 +765,97 @@ function App() {
                   </div>
                 </div>
               )}
+
+              <button className="btn-cancel" onClick={handleCancel}>
+                <X className="btn-icon" />
+                Cancel
+              </button>
             </div>
           )}
 
           {status === 'selecting_speaker' && (
             <div className="speaker-selection-section">
               <Users className="speaker-icon" />
-              <h2 className="speaker-title">Multiple Speakers Detected</h2>
+              <h2 className="speaker-title">
+                {speakers.length > 0 ? 'Speakers Found' : 'Analyzing Speakers...'}
+              </h2>
               <p className="speaker-subtitle">
-                We found {speakers.length} different voices in your podcast. 
-                Please select which voice should be used for the ad.
+                {speakers.length > 0 
+                  ? `Found ${speakers.length} voice${speakers.length > 1 ? 's' : ''} so far. Select the voice to use for the ad.`
+                  : 'Analyzing your podcast for different speakers...'}
               </p>
               
-              <div className="speakers-grid">
-                {speakers.map((speaker) => (
-                  <div
-                    key={speaker.id}
-                    className={`speaker-card ${selectedSpeaker === speaker.id ? 'selected' : ''}`}
-                    onClick={() => setSelectedSpeaker(speaker.id)}
-                  >
-                    <div className="speaker-card-header">
-                      <div className="speaker-avatar">
-                        <Users className="speaker-avatar-icon" />
+              {speakers.length > 0 ? (
+                <div className="speakers-grid">
+                  {speakers.map((speaker) => (
+                    <div
+                      key={speaker.id}
+                      className={`speaker-card ${selectedSpeaker === speaker.id ? 'selected' : ''}`}
+                      onClick={() => setSelectedSpeaker(speaker.id)}
+                    >
+                      <div className="speaker-card-header">
+                        <div className="speaker-avatar">
+                          <Users className="speaker-avatar-icon" />
+                        </div>
+                        <span className="speaker-name">Speaker {speaker.id + 1}</span>
                       </div>
-                      <span className="speaker-name">Speaker {speaker.id + 1}</span>
-                    </div>
-                    
-                    <div className="speaker-card-body">
-                      <p className="speaker-duration">
-                        ~{Math.round(speaker.total_speaking_time)}s of speech
-                      </p>
                       
-                      <button
-                        className={`btn-play ${playingSpeaker === speaker.id ? 'playing' : ''}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          playSpeakerSample(speaker.id);
-                        }}
-                      >
-                        {playingSpeaker === speaker.id ? (
-                          <>
-                            <Pause className="play-icon" />
-                            Stop Sample
-                          </>
-                        ) : (
-                          <>
-                            <Play className="play-icon" />
-                            Play Sample
-                          </>
-                        )}
-                      </button>
-                    </div>
-                    
-                    {selectedSpeaker === speaker.id && (
-                      <div className="speaker-selected-badge">
-                        <CheckCircle2 className="check-icon" />
-                        Selected
+                      <div className="speaker-card-body">
+                        <p className="speaker-duration">
+                          ~{Math.round(speaker.total_speaking_time)}s of speech
+                        </p>
+                        
+                        <button
+                          className={`btn-play ${playingSpeaker === speaker.id ? 'playing' : ''}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            playSpeakerSample(speaker.id);
+                          }}
+                        >
+                          {playingSpeaker === speaker.id ? (
+                            <>
+                              <Pause className="play-icon" />
+                              Stop Sample
+                            </>
+                          ) : (
+                            <>
+                              <Play className="play-icon" />
+                              Play Sample
+                            </>
+                          )}
+                        </button>
                       </div>
-                    )}
-                  </div>
-                ))}
-              </div>
+                      
+                      {selectedSpeaker === speaker.id && (
+                        <div className="speaker-selected-badge">
+                          <CheckCircle2 className="check-icon" />
+                          Selected
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  
+                  {/* Show loading card while still detecting */}
+                  {!window.speakerDetectionComplete && (
+                    <div className="speaker-card speaker-card-loading">
+                      <div className="speaker-card-header">
+                        <div className="speaker-avatar loading">
+                          <Loader2 className="speaker-avatar-icon spinning" />
+                        </div>
+                        <span className="speaker-name">Searching...</span>
+                      </div>
+                      <div className="speaker-card-body">
+                        <p className="speaker-duration">Looking for more speakers</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="speaker-loading">
+                  <Loader2 className="spinner" />
+                  <p>Analyzing audio for speakers...</p>
+                </div>
+              )}
 
               {error && (
                 <div className="error-message">
@@ -742,19 +864,21 @@ function App() {
                 </div>
               )}
 
-              <div className="speaker-actions">
-                <button
-                  className="btn-primary"
-                  onClick={confirmSpeakerSelection}
-                  disabled={selectedSpeaker === null}
-                >
-                  <Wand2 className="btn-icon" />
-                  Continue with Selected Voice
-                </button>
-                <button className="btn-secondary" onClick={handleReset}>
-                  Cancel
-                </button>
-              </div>
+              {speakers.length > 0 && (
+                <div className="speaker-actions">
+                  <button
+                    className="btn-primary"
+                    onClick={confirmSpeakerSelection}
+                    disabled={selectedSpeaker === null}
+                  >
+                    <Wand2 className="btn-icon" />
+                    Continue with Selected Voice
+                  </button>
+                  <button className="btn-secondary" onClick={handleReset}>
+                    Cancel
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -872,6 +996,18 @@ function App() {
                       Ad placed at a natural pause in the conversation
                     </p>
                   )}
+                  
+                  {adPlacement.placement_method && (
+                    <p className="placement-method">
+                      <Sparkles className="note-icon" />
+                      {adPlacement.placement_method === 'problem_match' 
+                        ? 'Placed after relevant problem discussion' 
+                        : 'Placed using content similarity analysis'}
+                      {adPlacement.placement_reason && (
+                        <span className="placement-reason"> — {adPlacement.placement_reason}</span>
+                      )}
+                    </p>
+                  )}
                 </div>
               )}
               
@@ -899,10 +1035,6 @@ function App() {
           )}
         </main>
 
-        {/* Footer */}
-        <footer className="footer">
-          <p>Powered by Open Source AI Models from HuggingFace</p>
-        </footer>
       </div>
     </div>
   );

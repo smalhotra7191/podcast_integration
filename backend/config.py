@@ -7,11 +7,15 @@ import os
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "sk_41f763477b8923b6d4425abe3b89dba10447bfbc79622c42")
 
 # ElevenLabs Voice Settings
+# These settings control how closely the cloned voice matches the original
 ELEVENLABS_VOICE_SETTINGS = {
-    "stability": 0.5,           # 0-1: Lower = more expressive, Higher = more stable
-    "similarity_boost": 0.75,   # 0-1: Higher = closer to original voice
-    "style": 0.0,               # 0-1: Style exaggeration (only for v2 models)
-    "use_speaker_boost": True   # Enhances voice clarity
+    "stability": 0.35,          # 0-1: Lower = more expressive/natural tempo, Higher = more robotic
+                                 # Reduced from 0.5 to allow more natural tempo variations
+    "similarity_boost": 0.85,   # 0-1: Higher = closer to original voice timbre and accent
+                                 # Increased from 0.75 for better accent matching
+    "style": 0.15,              # 0-1: Style exaggeration - captures speaking style/prosody
+                                 # Increased from 0.0 to better match speaking patterns
+    "use_speaker_boost": True   # Enhances voice clarity and similarity
 }
 
 # ElevenLabs Model IDs
