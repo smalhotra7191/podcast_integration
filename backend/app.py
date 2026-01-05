@@ -753,5 +753,6 @@ def upload_files_chunked():
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    print("Starting Flask server on port 5000...")
-    app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)
+    port = int(os.environ.get('PORT', 5000))
+    print(f"Starting Flask server on port {port}...")
+    app.run(debug=False, host='0.0.0.0', port=port, threaded=True)
